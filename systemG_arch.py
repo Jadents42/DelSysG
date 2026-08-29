@@ -33,12 +33,18 @@ class SystemG():
         self.divider_motor_channels = [(8, 9), (10, 11)]
 
         # Servo Driver for Autohat
-        self.servo_hat = ServoKit(channels=16, i2c=I2C, address=0x41)
+        self.servo_hat = ServoKit(channels=16, i2c=I2C, address=0x40)
         # Servo channels for [rail 0, rail 1, rail 2, rail 3]
         self.servo_channels = [0, 1, 2, 3]
         self.engaged = [False]*len(self.servo_channels)
-        self.center = 135  # Center position for servos
 
+        # Tuned center positions for Servos
+        self.servo_centers = {
+            0: 135,  # Channel 0 (Servo 1)
+            1: 120,  # Channel 1 (Servo 2)
+            2: 90,  # Channel 2 (Servo 3)
+            3: 95   # Channel 3 (Servo 4)
+        }
         # DC + Stepper Motor Pi Hat channels
         self.stm_ser = serial.Serial('/dev/serial0', 921600, timeout=.2)
 
@@ -53,8 +59,8 @@ class SystemG():
         for ch in self.servo_channels:
             self.servo_hat.servo[ch].actuation_range = 270
             self.servo_hat.servo[ch].set_pulse_width_range(500, 2500)
-            # Moves servo position to center
-            self.servo_hat.servo[ch].angle = self.center
+            # Moves servo positions to center
+            self.servo_hat.servo[ch].angle = self.servo_centers[ch]
             sleep(1)
 
         # Start encoder reading and position saving threads
@@ -78,21 +84,21 @@ class SystemG():
             print(f"{div_idx} is not in {self.partitions_idx[:-1]}")
             return
 
-        if div_idx == 1:
-            if set_pos > self.div_pos[1] - self.div_tol - self.rail_width:
-                print("Divider 1 cannot move beyond Divider 2")
-                return
+        # if div_idx == 1:
+        #     if set_pos > self.div_pos[1] - self.div_tol - self.rail_width:
+        #         print("Divider 1 cannot move beyond Divider 2")
+        #         return
         
-        if div_idx == 2:
-            if set_pos < self.div_pos[0] + self.div_tol + self.rail_width:
-                print("Divider 2 cannot move beyond Divider 1")
-                return
+        # if div_idx == 2:
+        #     if set_pos < self.div_pos[0] + self.div_tol + self.rail_width:
+        #         print("Divider 2 cannot move beyond Divider 1")
+        #         return
         
         div_idx -= 1
         
         assert div_idx >= 0
         assert div_idx < len(self.divider_motor_channels)
-        assert 0 <= set_pos <= self.max_div_pos
+        #assert 0 <= set_pos <= self.max_div_pos
 
         ch = self.divider_motor_channels[div_idx]
         in_range = False
@@ -107,7 +113,7 @@ class SystemG():
             with self.stm_lock:
                 if (set_pos - self.div_tol < self.div_pos[div_idx] < set_pos + self.div_tol):
                     in_range = True
-            print(f"Divider position: {self.div_pos[div_idx]} mm")
+            #print(f"Divider position: {self.div_pos[div_idx]} mm")
         
         self.drive_pwm_motor(ch, 0.0)
 
@@ -152,7 +158,7 @@ class SystemG():
                     r_in_range = True
                 if (set_pos - self.rail_tol < self.rail_pos[part_idx - 1] < set_pos + self.rail_tol):
                     l_in_range = True
-            print(f"Rail positions: [{self.rail_pos[part_idx]}, {self.rail_pos[part_idx - 1]}] mm")
+            #print(f"Rail positions: [{self.rail_pos[part_idx]}, {self.rail_pos[part_idx - 1]}] mm")
         
         self.drive_pwm_motor(r_ch, 0.0)
         self.drive_pwm_motor(l_ch, 0.0)
@@ -184,7 +190,7 @@ class SystemG():
         self.servo_hat.servo[right_ch].angle = self.center + angle
         self.engaged[right_ch] = engage
 
-        print(f"Servo angles: [{-angle}, {angle}] deg")
+        #print(f"Servo angles: [{-angle}, {angle}] deg")
 
     
     def drive_pwm_motor(self, motor_channels: list[int, int], speed=1.0):
@@ -205,24 +211,43 @@ class SystemG():
             self.pwm_hat.channels[motor_channels[1]].duty_cycle = 0x0000
             self.pwm_hat.channels[motor_channels[0]].duty_cycle = duty_cycle
 
-    def move_door(self, door_idx: str, set_pos: float):
+    def move_door(self, door_idx: int, set_pos: float):
         '''
         Takes in the door index and the set position in mm
         Runs until the door reaches the set position within tolerance
-        (Thread safe with encoder updates)
         '''
         door_idx -= 1
         assert 0 <= door_idx < len(self.door_pos)
-        assert 0 <= set_pos <= self.max_door_pos
         
-        dist = set_pos - self.door_pos[door_idx]
-        num_steps = int(dist / 150 * 3 * 200 * 8) # 150mm per revolution, 3:1 gear ratio, 200 steps per rev, 1/8 microstepping
-
-        # Format and send the message
-        message = f"step{door_idx+1}: {num_steps}"
-        print("Sending message to STM32:", message)
-        self.stm_ser.write(message.encode())
-        self.door_pos[door_idx] = set_pos
+        start_pos = self.door_pos[door_idx]
+        total_dist = set_pos - start_pos
+        
+        if abs(total_dist) < 0.1:
+            return 0
+            
+        # Paced mm increments to let the motor move without high-freq choking
+        step_increment = 4.0 if total_dist > 0 else -4.0
+        current_pos = start_pos
+        
+        while True:
+            if abs(set_pos - current_pos) <= abs(step_increment):
+                current_pos = set_pos
+            else:
+                current_pos += step_increment
+                
+            dist_to_move = current_pos - self.door_pos[door_idx]
+            # Correct math including the * 8 microstepping factor
+            num_steps = int(dist_to_move / 150 * 1.0 * 200 * 8)
+            
+            message = f"step{door_idx+1}: {num_steps}\n"
+            self.stm_ser.write(message.encode())
+            
+            self.door_pos[door_idx] = current_pos
+            if current_pos == set_pos:
+                break
+                
+            sleep(0.08) # Relaxed delay so serial interrupts don't starve the STM32 timer
+            
         return num_steps
     
     def jiggle_motors(self):
@@ -247,7 +272,7 @@ class SystemG():
     
     def stop_motion(self):
         '''
-        Stops all motion by sending zero speed to all motors.
+        Stops all motion by sending zero speed to all motors and aborting STM32 steps.
         '''
         # Stop divider motors
         for ch in self.divider_motor_channels:
@@ -256,6 +281,13 @@ class SystemG():
         # Stop rail motors
         for ch in self.rail_motor_channels:
             self.drive_pwm_motor(ch, 0.0)
+
+        # Stop Door Steppers (STM32)
+        try:
+            self.stm_ser.write(b"step1: 0\n")
+            self.stm_ser.write(b"step2: 0\n")
+        except Exception:
+            pass
 
     def set_positions(self, group: str, positions: list[float]):
         '''
@@ -333,7 +365,7 @@ class SystemG():
         from serial and update the position variables.
         format of serial line: "enc<#>: <count>"
         '''
-        print("Reading Encoders...")
+        #print("Reading Encoders...")
 
         # Encoders have 3 counts per revolution
         # Motors are 1/455 gear ratio
@@ -361,10 +393,9 @@ class SystemG():
             except ValueError:
                 continue
 
-            if not full_init:
-                if cts_init.get(num, None) is None:
-                    cts_init[num] = ct
-                if len(cts_init) == num_encoders:
+            if cts_init.get(num, None) is None:
+                cts_init[num] = ct
+                if not full_init and len(cts_init) == num_encoders:
                     full_init = True
                     print("Encoder initialization complete.")
 
