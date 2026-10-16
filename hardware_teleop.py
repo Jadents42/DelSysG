@@ -334,18 +334,30 @@ class HardwareTeachPendant:
         '''
         pwm_val = int(JOG_PULSE_DUTY * 65535)
 
-        if direction > 0:
-            self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = pwm_val
-            self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = 0
-        else:
-            self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = 0
-            self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = pwm_val
+        try:
+            if direction > 0:
+                self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = pwm_val
+                self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = 0
+            else:
+                self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = 0
+                self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = pwm_val
+        except OSError as e:
+            # I2C write failed (e.g. a bus fault on this channel) - don't crash the whole
+            # pendant over it. Don't track it as active, and best-effort try to brake it
+            # (which may also fail if the bus is in a bad state - that's what E-stop is for).
+            self.alert_message = f"I2C write failed on channels {ch_tuple} ({e}); braking."
+            active_dict.pop(idx, None)
+            self._brake_channel(ch_tuple)
+            return
 
         active_dict[idx] = {'direction': direction, 'last_seen': time.time()}
 
     def _brake_channel(self, ch_tuple):
-        self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = 0
-        self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = 0
+        try:
+            self.sysG.pwm_hat.channels[ch_tuple[0]].duty_cycle = 0
+            self.sysG.pwm_hat.channels[ch_tuple[1]].duty_cycle = 0
+        except OSError as e:
+            self.alert_message = f"I2C write failed while braking channels {ch_tuple} ({e})! Hit X for E-STOP."
 
     def _drive_rail_jog(self, rail_idx, direction):
         self._drive_channel_jog(self.active_rail_jog, rail_idx, self.sysG.rail_motor_channels[rail_idx], direction)
