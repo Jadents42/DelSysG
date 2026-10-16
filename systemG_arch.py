@@ -63,6 +63,10 @@ class SystemG():
             self.servo_hat.servo[ch].angle = self.servo_centers[ch]
             sleep(1)
 
+        # Limit switch states from STM32 [lim1, lim2, lim3, lim4] on pins [A6, A5, A1, A0]
+        # True = pressed. None until the first "lim" line arrives.
+        self.limit_switches = None
+
         # Start encoder reading and position saving threads
         self.stm_lock = threading.Lock()
         self.enc_thread = threading.Thread(target=self._encoder_serial_thread, daemon=True)
@@ -183,11 +187,11 @@ class SystemG():
             angle = 0
 
         # Left servo
-        self.servo_hat.servo[left_ch].angle = self.center - angle
+        self.servo_hat.servo[left_ch].angle = self.servo_centers[left_ch] - angle
         self.engaged[left_ch] = engage
         sleep(1)
         # Right servo 
-        self.servo_hat.servo[right_ch].angle = self.center + angle
+        self.servo_hat.servo[right_ch].angle = self.servo_centers[right_ch] + angle
         self.engaged[right_ch] = engage
 
         #print(f"Servo angles: [{-angle}, {angle}] deg")
@@ -324,6 +328,14 @@ class SystemG():
             "doors": door_copy
         }
 
+    def get_limit_switches(self):
+        '''
+        Returns the limit switch states [lim1, lim2, lim3, lim4] (True = pressed),
+        or None if no "lim" line has been received from the STM32 yet.
+        '''
+        with self.stm_lock:
+            return None if self.limit_switches is None else self.limit_switches.copy()
+
 
     def load_positions_from_csv(self, filename):
         """
@@ -364,6 +376,7 @@ class SystemG():
         Thread function to continuously read encoder values
         from serial and update the position variables.
         format of serial line: "enc<#>: <count>"
+        limit switch line: "lim: <s1>,<s2>,<s3>,<s4>" (1 = pressed)
         '''
         #print("Reading Encoders...")
 
@@ -387,6 +400,16 @@ class SystemG():
             try:
                 key, value = line.split(":")
                 num = key.strip()
+
+                if num == "lim":
+                    states = [v.strip() == "1" for v in value.split(",")]
+                    if len(states) == 4:
+                        with self.stm_lock:
+                            self.limit_switches = states
+                    continue
+
+                if not num.startswith("enc"):
+                    continue
                 ct = int(value.strip())
                 encoders[num] = ct
 
